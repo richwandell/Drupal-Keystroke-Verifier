@@ -1,0 +1,515 @@
+<?php
+
+if (!function_exists('stats_standard_deviation')) {
+  /**
+   * This user-land implementation follows the implementation quite strictly;
+   * it does not attempt to improve the code or algorithm in any way. It will
+   * raise a warning if you have fewer than 2 values in your array, just like
+   * the extension does (although as an E_USER_WARNING, not E_WARNING).
+   *
+   * @param array $a
+   * @param bool $sample [optional] Defaults to false
+   * @return float|bool The standard deviation or false on error.
+   */
+  function stats_standard_deviation(array $a, $sample = false) {
+    $n = count($a);
+    if ($n === 0) {
+      trigger_error("The array has zero elements", E_USER_WARNING);
+      return false;
+    }
+    if ($sample && $n === 1) {
+      trigger_error("The array has only 1 element", E_USER_WARNING);
+      return false;
+    }
+    $mean = array_sum($a) / $n;
+    $carry = 0.0;
+    foreach ($a as $val) {
+      $d = ((double) $val) - $mean;
+      $carry += $d * $d;
+    };
+    if ($sample) {
+      --$n;
+    }
+    return sqrt($carry / $n);
+  }
+}
+
+function _keystroke_verifier_node_submit($node, $form) {
+  global $user;
+  if(isset($_POST['ksv_digraphs'])){
+    $packages = json_decode($_POST['ksv_digraphs']);
+    foreach($packages as $digraphsg){
+      $package_id = uniqid();
+      foreach($digraphsg as $dg) {
+        db_insert('keystroke_verifier_digraphs')
+          ->fields(array(
+            'nid' => $form['node']->nid,
+            'puid' => $package_id,
+            'start_key' => $dg[0],
+            'end_key' => $dg[1],
+            'delta' => $dg[2]
+          ))
+          ->execute();
+      }
+    }
+  }
+  _keystroke_verifier_remove_outliers($user->uid);
+}
+
+/**
+ * This function is used to clear the table of outliers that are outside of the
+ * number of standard deviations from the mean set by the weighting factor
+ * in the module settings.
+ * @param $uid
+ */
+function _keystroke_verifier_remove_outliers($uid){
+  $weighting_factor = (int)variable_get("ksv_weighting_factor", 2);
+  $q = db_select('keystroke_verifier_digraphs', 'vd');
+  $q->addTag('ksv_ro_get_di');
+  $q->join("node", "n", "vd.nid = n.nid");
+  $q->join("users", "u", "n.uid = u.uid");
+  $q->join("field_data_field_ksv_verified", "kv", "n.nid = kv.entity_id");
+  $q->condition(db_and()
+    ->condition("kv.field_ksv_verified_value", 1, "=")
+    ->condition('u.uid', $uid, '=')
+  );
+  $q->groupBy("vd.start_key");
+  $q->groupBy("vd.end_key");
+  $q->fields("vd", array("start_key", "end_key"));
+  $result = $q->execute();
+
+  foreach ($result as $row) {
+    $q1 = db_select("keystroke_verifier_digraphs", "vd");
+    $q1->addTag('ksv_ro_get_std');
+    $q1->join("node", "n", "vd.nid = n.nid");
+    $q1->join("users", "u", "n.uid = u.uid");
+    $q1->join("field_data_field_ksv_verified", "kv", "n.nid = kv.entity_id");
+    $q1->addExpression('std(vd.delta)', 'standard_dev');
+    $q1->addExpression('avg(vd.delta)', 'average');
+    $q1->condition(db_and()
+      ->condition("kv.field_ksv_verified_value", 1, "=")
+      ->condition("vd.start_key", $row->start_key, "=")
+      ->condition("vd.end_key", $row->end_key, "=")
+      ->condition("n.uid", $uid, "=")
+    );
+
+    $stats = $q1->execute()->fetchAssoc();
+    if(is_array($stats)){
+      $dev = $stats['standard_dev'];
+      $avg = $stats['average'];
+
+      $q2 = db_select("keystroke_verifier_digraphs", "vd");
+      $q2->addTag('ksv_ro_get_oulier');
+      $q2->join("node", "n", "vd.nid = n.nid");
+      $q2->join("users", "u", "n.uid = u.uid");
+      $q2->join("field_data_field_ksv_verified", "kv", "n.nid = kv.entity_id");
+      $q2->fields("vd", array("did"));
+      $q2->condition(db_and()
+        ->condition("kv.field_ksv_verified_value", 1, "=")
+        ->condition("vd.start_key", $row->start_key, "=")
+        ->condition("vd.end_key", $row->end_key, "=")
+        ->condition("n.uid", $uid, "=")
+        ->condition(db_or()
+          ->condition("vd.delta", $avg + ($weighting_factor * $dev), ">")
+          ->condition("vd.delta", $avg - ($weighting_factor * $dev), "<")
+        )
+      );
+      $outliers = $q2->execute();
+      foreach($outliers as $out){
+        db_delete("keystroke_verifier_digraphs")
+          ->condition("did", $out->did, "=")
+          ->execute();
+      }
+    }
+  }
+}
+
+/**
+ * @return array
+ */
+function keystroke_verifier_node_operations(){
+  return array(
+    'ksv_verify' => array(
+      'label' => t('Mark as Verified Content'),
+      'callback' => '_keystroke_verifier_mark_verified',
+    ),
+    'ksv_unverify' => array(
+      'label' => t('Mark as Unverified Content'),
+      'callback' => '_keystroke_verifier_unmark_verified'
+    )
+  );
+}
+
+/**
+ * @throws \Exception
+ */
+function _keystroke_verifier_mark_verified(){
+  global $user;
+  foreach($_POST["nodes"] as $node => $id){
+    $n = node_load($id);
+    $field_language = field_language('node', $n, 'field_ksv_verified');
+    $n->field_ksv_verified[$field_language][0]['value'] = 1;
+    node_save($n);
+    _keystroke_verifier_remove_outliers($n->uid);
+  }
+}
+
+/**
+ * @throws \Exception
+ */
+function _keystroke_verifier_unmark_verified(){
+  foreach($_POST["nodes"] as $node => $id){
+    $n = node_load($id);
+    $field_language = field_language('node', $n, 'field_ksv_verified');
+    $n->field_ksv_verified[$field_language][0]['value'] = 0;
+    node_save($n);
+  }
+}
+
+
+/**
+ * Implements hook_form_FORM_ID_alter().
+ */
+function keystroke_verifier_form_NODE_FORM_alter(&$form, &$form_state, $form_id) {
+  hide($form['field_ksv_verified']);
+  $form['ksv_digraphs'] = array(
+    '#type' => 'hidden',
+    '#value' => ''
+  );
+  $form['actions']['submit']['#submit'][] = '_keystroke_verifier_node_submit';
+}
+
+
+/**
+ * Implements hook_custom_theme().
+ */
+function keystroke_verifier_menu() {
+  return array(
+    'admin/config/keystroke_verifier' => array(
+      'title' => t('Keystroke Verifier Configuration'),
+      'description' => t('Allows administrators to configure keystroke verifier settings.'),
+      'position' => 'left',
+      'weight' => -30,
+      'page callback' => 'drupal_get_form',
+      'page arguments' => array('keystroke_verifier_admin'),
+      'access arguments' => array('administer keystroke')
+    ),
+    'admin/config/keystroke_verifier/manage' => array(
+      'title' => t('Settings'),
+      'description' => t('Keystroke Verifier Settings'),
+      'page callback' => 'drupal_get_form',
+      'page arguments' => array('keystroke_verifier_admin'),
+      'access arguments' => array('administer keystroke'),
+      'weight' => -10
+    ),
+    'keystroke_verifier/ajax/%/%' => array(
+      'access callback' => '_keystroke_verifier_access_callback',
+      'access arguments' => array(2),
+      'page callback' => '_keystroke_verifier_ajax_callback',
+      'page arguments' => array(3),
+    )
+  );
+}
+
+
+/**
+ * @param null $token
+ * @return bool
+ */
+function _keystroke_verifier_access_callback($token = NULL){
+  if(user_is_logged_in() && drupal_valid_token($token, 'keystroke_verifier')){
+    return true;
+  }
+  return false;
+}
+
+/**
+ * @param null $action
+ */
+function _keystroke_verifier_ajax_callback($action = NULL){
+  global $user;
+  $weighting_factor = (int)variable_get("ksv_weighting_factor", 2);
+  $start_keys = array();
+  $end_keys = array();
+  $e1 = array();
+  $dgs = array();
+  //Make a list of start and end keys
+  foreach($_POST["package"] as $dg){
+    if(!isset($dgs[$dg[0].$dg[1]])){
+      $dgs[$dg[0].$dg[1]] = array();
+    }
+    $dgs[$dg[0].$dg[1]][] = $dg[2];
+    $e1[] = $dg;
+    $start_keys[] = $dg[0];
+    $end_keys[] = $dg[1];
+  }
+
+  foreach($e1 as &$dg){
+    $key = $dg[0].$dg[1];
+    $tmp = $dgs[$key];
+    if(count($tmp) > 1) {
+      $mean = array_sum($tmp) / count($tmp);
+      $stddev = stats_standard_deviation($tmp);
+      $new = array();
+      foreach($tmp as $num){
+        if($num > $mean + $stddev * $weighting_factor or $num < $mean - $stddev * $weighting_factor){
+          continue;
+        }else{
+          $new[] = $num;
+        }
+      }
+      $dg[2] = array_sum($new) / count($new);
+    }else {
+      $dg[2] = (float)$tmp[0];
+    }
+  }
+
+  $e1 = array_values(array_unique($e1, SORT_ASC));
+
+  switch($action){
+    case "package":
+      list($R, $A) = _keystroke_verifier_test_digraphs($e1, $start_keys, $end_keys, $user->uid);
+
+      drupal_json_output(array(
+        'good' => $R + $A < 1,
+        'A' => $A,
+        'R' => $R,
+        'together' => $R + $A
+      ));
+      break;
+    case "whoami":
+      $users = entity_load('user');
+      $tests = array();
+      foreach($users as $uid => $user){
+        list($R, $A) = _keystroke_verifier_test_digraphs($e1, $start_keys, $end_keys, $uid);
+        $tests[] = array(
+          "uid" => $uid,
+          "R" => $R,
+          "A" => $A,
+          "name" => $user->name
+        );
+      }
+      usort($tests, function($a, $b){
+        $av = $a["A"] + $a["R"];
+        $bv = $b["A"] + $b["R"];
+        if($av > $bv){
+          return 1;
+        }else{
+          return 0;
+        }
+      });
+      drupal_json_output(array(
+        'tests' => array_values(array_filter($tests, function($el){
+          return !($el["A"] == 1 and $el["R"] == 0);
+        }))
+      ));
+      break;
+  }
+
+}
+
+/**
+ * Calculates the R and A values
+ * @param $e1
+ * @param $start_keys
+ * @param $end_keys
+ * @param $uid
+ * @return array R and A value
+ */
+function _keystroke_verifier_test_digraphs($e1, $start_keys, $end_keys, $uid){
+  //Get any digraphs that are in the sample package.
+  $q2 = db_select("keystroke_verifier_digraphs", "vd");
+  $q2->addTag('ksv_ak_gd');
+  $q2->join("node", "n", "vd.nid = n.nid");
+  $q2->join("users", "u", "n.uid = u.uid");
+  $q2->join("field_data_field_ksv_verified", "kv", "n.nid = kv.entity_id");
+  $q2->condition(db_and()
+    ->condition("kv.field_ksv_verified_value", 1, "=")
+    ->condition('vd.start_key', array_unique($start_keys), 'in')
+    ->condition('vd.end_key', array_unique($end_keys), 'in')
+    ->condition("n.uid", $uid, "=")
+  );
+  $q2->fields("vd", array("start_key", "end_key"));
+  $q2->addExpression('avg(vd.delta)', 'delta');
+  $q2->groupBy("start_key");
+  $q2->groupBy("end_key");
+  $q2->orderBy("did", "DESC");
+  $results = $q2->execute();
+
+  $e2 = array();
+  foreach ($results as $row) {
+    $e2[] = array($row->start_key, $row->end_key, $row->delta);
+  }
+  /**
+   * Find digraphs that exist in both arrays
+   */
+  $_e1 = array();
+  $_e2 = array();
+  $used = array();
+  foreach ($e1 as $e) {
+    foreach ($e2 as $ee) {
+      if ($e[0] == $ee[0] && $e[1] == $ee[1] && !in_array($e[0].$e[1], $used)) {
+        $_e1[] = $e;
+        $_e2[] = $ee;
+        $used[] = $e[0].$e[1];
+      }
+    }
+  }
+
+  /**
+   * Calculate the A value
+   */
+  $a_threshold = 1.25;
+  $num_below = 0;
+  foreach ($_e1 as $num => $e) {
+    if ($e[2] > $_e2[$num][2] && $e[2] / $_e2[$num][2] < $a_threshold) {
+      $num_below++;
+    }
+    else {
+      if ($_e2[$num][2] > $e[2] && $_e2[$num][2] / $e[2] < $a_threshold) {
+        $num_below++;
+      }
+    }
+  }
+  $A = 1 - $num_below / count($_e1);
+
+  /**
+   * Sort both arrays by the time delta
+   */
+  $sort = function ($a, $b) {
+    return $a[2] > $b[2];
+  };
+  usort($_e1, $sort);
+  usort($_e2, $sort);
+  /**
+   * Calculate the difference for R value
+   */
+  $change = 0;
+  foreach ($_e1 as $i1 => $d1) {
+    foreach ($_e2 as $i2 => $d2) {
+      if ($d2[0] == $d1[0] && $d2[1] == $d1[1]) {
+        $change += abs($i1 - $i2);
+      }
+    }
+  }
+  $max_change = (pow(count($_e1), 2) - 1) / 2;
+  $R = $change / $max_change;
+
+  return array($R, $A);
+}
+
+/**
+ * @param \SelectQueryInterface $query
+ * @return string
+ */
+function _get_query_string(SelectQueryInterface $query) {
+  $string = (string) $query;
+  $arguments = $query->arguments();
+
+  if (!empty($arguments) && is_array($arguments)) {
+    foreach ($arguments as $placeholder => &$value) {
+      if (is_string($value)) {
+        $value = "'$value'";
+      }
+    }
+
+    $string = strtr($string, $arguments);
+  }
+
+  return preg_replace('/[{}]/', "", $string);
+}
+
+/**
+ * @return mixed
+ */
+function keystroke_verifier_admin() {
+  return system_settings_form(array(
+    'ksv_f1' => array(
+      '#type' => 'fieldset',
+      'ksv_pages' => array(
+        '#title' => t('Pages'),
+        '#description' => t('Pages to lock down. Accepts PCRE Regular expressions'),
+        '#type' => 'textarea',
+        '#row' => 10,
+        '#columns' => 40,
+        '#required' => TRUE,
+        '#default_value' => variable_get('ksv_pages', '^node\/add\/article$'),
+      ),
+      'ksv_show_img' => array(
+        '#type' => 'checkbox',
+        '#title' => t('Show Image'),
+        '#description' => t('Whether or not we should display the Keystroke Verifier Image in the lower left corner of the locked pages.'),
+        '#default_value' => variable_get('ksv_show_img', TRUE)
+      )
+    ),
+    'ksv_f2' => array(
+      '#type' => 'fieldset',
+      '#collapsible' => TRUE,
+      '#collapsed' => TRUE,
+      '#title' => t('Advanced Settings'),
+      'ksv_tbp' => array(
+        '#title' => t('Time between packages'),
+        '#description' => t('Set to the max time between sentences in ms. Time differences above this time will be ignored'),
+        '#type' => 'textfield',
+        '#element_validate' => array('element_validate_integer_positive'),
+        '#default_value' => (int)variable_get('ksv_tbp', '500')
+      ),
+      'ksv_fkeys' => array(
+        '#title' => t('Number of keys before verification.'),
+        '#description' => t('The number of key presses before the first verification is performed.'),
+        '#type' => 'textfield',
+        '#element_validate' => array('element_validate_integer_positive'),
+        '#default_value' => (int)variable_get('ksv_keys', '5')
+      ),
+      'ksv_ikeys' => array(
+        '#title' => t('Number of keys between verifications.'),
+        '#description' => t('The number of key presses between verification checks.'),
+        '#type' => 'textfield',
+        '#element_validate' => array('element_validate_integer_positive'),
+        '#default_value' => (int)variable_get('ksv_ikeys', '50')
+      ),
+      'ksv_plen' => array(
+        '#title' => t('Package Length'),
+        '#description' => t('The sample size that is used for verification.'),
+        '#type' => 'textfield',
+        '#element_validate' => array('element_validate_integer_positive'),
+        '#default_value' => (int)variable_get('ksv_plen', '50')
+      ),
+      'ksv_weighting_factor' => array(
+        '#title' => t('Weighting Factor'),
+        '#description' => t('Number of standard deviations from the mean that can be used as an acceptible test value.'),
+        '#type' => 'textfield',
+        '#element_validate' => array('element_validate_integer_positive'),
+        '#default_value' => (int)variable_get('ksv_weighting_factor', '2')
+      )
+    )
+  ));
+}
+
+/**
+ * @param $form
+ * @param $form_state
+ * @param $form_id
+ */
+function keystroke_verifier_page_alter($page){
+  $pages = variable_get("ksv_pages");
+  $pages = str_ireplace(array("\r", "\n"), "", explode(PHP_EOL, $pages));
+  $rp = request_path();
+  $regex = "/".join("|", $pages)."/";
+
+  if(preg_match($regex, $rp) || $rp == 'node/add/article') {
+    $my_settings = array(
+      'csrf' => drupal_get_token('keystroke_verifier'),
+      'rp' => $rp,
+      'tbp' => (int)variable_get('ksv_tbp', '500'),
+      'fkeys' => (int)variable_get('ksv_fkeys', '5'),
+      'ikeys' => (int)variable_get('ksv_ikeys', '50'),
+      'plen' => (int)variable_get('ksv_plen', '50'),
+      'show_img' => variable_get('ksv_show_img', TRUE),
+      'good_img' => '/'.drupal_get_path('module', 'keystroke_verifier') . '/img/ksv_good50.png',
+      'bad_img' => '/'.drupal_get_path('module', 'keystroke_verifier') . '/img/ksv_bad50.png'
+    );
+    drupal_add_js(array('keystroke_verifier' => $my_settings), 'setting');
+    drupal_add_js(drupal_get_path('module', 'keystroke_verifier') . '/js/ksv.js');
+  }
+}

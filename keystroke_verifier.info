@@ -1,0 +1,13 @@
+name = Keystroke Verifier
+description = A module for continuous user verification
+package = Security
+core = 7.x
+version = 7.x-0.1
+configure = admin/config/keystroke_verifier/manage
+files[] = keystroke_verifier.module
+
+dependencies[] = 'field'
+dependencies[] = 'node'
+dependencies[] = 'options'
+dependencies[] = 'text'
+dependencies[] = 'list'

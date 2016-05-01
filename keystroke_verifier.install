@@ -1,0 +1,146 @@
+<?php
+
+function keystroke_verifier_uninstall(){
+  if(field_info_field('field_ksv_verified')){
+    if ($instance = field_info_instance('node', 'field_ksv_verified', 'article')) {
+      field_delete_instance($instance);
+    }
+    field_delete_field('field_ksv_verified');
+    field_purge_batch(100);
+  }
+}
+
+
+function keystroke_verifier_install(){
+  if(!field_info_field('field_ksv_verified')) {
+    $field_bases = array();
+
+    // Exported field_base: 'field_ksv_verified'.
+    $field_base = array(
+      'active' => 1,
+      'cardinality' => 1,
+      'deleted' => 0,
+      'entity_types' => array(),
+      'field_name' => 'field_ksv_verified',
+      'indexes' => array(
+        'value' => array(
+          0 => 'value',
+        ),
+      ),
+      'locked' => 0,
+      'module' => 'list',
+      'settings' => array(
+        'allowed_values' => array(
+          0 => 0,
+          1 => 1,
+        ),
+        'allowed_values_function' => '',
+      ),
+      'translatable' => 0,
+      'type' => 'list_boolean',
+    );
+
+    field_create_field($field_base);
+
+
+    $field_instances = array();
+
+    // Exported field_instance: 'node-article-field_ksv_verified'.
+    $field_instance = array(
+      'bundle' => 'article',
+      'default_value' => NULL,
+      'deleted' => 0,
+      'description' => '',
+      'display' => array(
+        'default' => array(
+          'label' => 'hidden',
+          'settings' => array(),
+          'type' => 'hidden',
+          'weight' => 11,
+        ),
+        'teaser' => array(
+          'label' => 'above',
+          'settings' => array(),
+          'type' => 'hidden',
+          'weight' => 0,
+        ),
+      ),
+      'entity_type' => 'node',
+      'field_name' => 'field_ksv_verified',
+      'label' => 'Verified',
+      'required' => FALSE,
+      'settings' => array(
+        'user_register_form' => FALSE,
+      ),
+      'widget' => array(
+        'module' => 'options',
+        'settings' => array(
+          'display_label' => 1,
+        ),
+        'type' => 'options_onoff',
+        'weight' => 0,
+      ),
+    );
+
+    // Translatables
+    // Included for use with string extractors like potx.
+    t('Verified');
+
+    field_create_instance($field_instance);
+  }
+}
+
+/**
+ * Implements hook_schema().
+ */
+function keystroke_verifier_schema() {
+  $schema['keystroke_verifier_digraphs'] = array(
+    'description' => 'Stores Digraph information.',
+    'fields' => array(
+      'did' => array(
+        'type' => 'serial',
+        'not null' => TRUE,
+        'description' => 'The digraph id.',
+      ),
+      'nid' => array(
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'description' => 'The node id for the associated node',
+      ),
+      'puid' => array(
+        'type' => 'char',
+        'length' => 13,
+        'not null' => TRUE,
+        'description' => 'The package unique identifier. Identifies sentences in a node.',
+      ),
+      'start_key' => array(
+        'type' => 'char',
+        'not null' => TRUE,
+        'description' => 'The start character',
+      ),
+      'end_key' => array(
+        'type' => 'char',
+        'not null' => TRUE,
+        'description' => 'The end character',
+      ),
+      'delta' => array(
+        'type' => 'float',
+        'not null' => TRUE,
+        'description' => 'The delta'
+      )
+    ),
+    'indexes' => array(
+      "start_end" => array('start_key', 'end_key'),
+      "puid" => array('puid')
+    ),
+    'primary key' => array('did'),
+    'foreign keys' => array(
+      'did_nid' => array(
+        'table' => 'node',
+        'columns' => array('nid' => 'nid'),
+      ),
+    ),
+  );
+  return $schema;
+}
